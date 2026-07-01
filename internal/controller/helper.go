@@ -17,8 +17,81 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+const (
+	// bootstrapAnnotationPrefix is the common prefix for all bootstrap completion
+	// annotations on a Node. The suffix is the rule's metadata.uid (RFC 4122 UUID,
+	// ~36 chars), which is immutable for the object's lifetime and globally unique.
+	//
+	// Full key format: readiness.k8s.io/bootstrap-completed-<ruleUID>
+	// Value format:    {"rule":"<ruleName>"}   (for human readability)
+	bootstrapAnnotationPrefix = "readiness.k8s.io/bootstrap-completed-"
+)
+
+// bootstrapAnnotationKey returns the annotation key for a rule's bootstrap
+// completion state, using the rule's UID as the suffix.
+func bootstrapAnnotationKey(uid types.UID) string {
+	return bootstrapAnnotationPrefix + string(uid)
+}
+
+// bootstrapAnnotationValue returns the JSON-encoded value to store in the
+// bootstrap annotation. It includes the rule name for human readability.
+func bootstrapAnnotationValue(ruleName string) string {
+	v := struct {
+		Rule string `json:"rule"`
+	}{Rule: ruleName}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"rule":""}` // should never happen
+	}
+	return string(b)
+}
+
+// isLegacyBootstrapKey returns true if key is a legacy per-rule-name bootstrap
+// annotation (readiness.k8s.io/bootstrap-completed-<name>). Legacy keys have a
+// suffix that is NOT a valid UUID (i.e. doesn't contain exactly 4 hyphens /
+// 36 chars as per RFC 4122).
+func isLegacyBootstrapKey(key string) bool {
+	if !strings.HasPrefix(key, bootstrapAnnotationPrefix) {
+		return false
+	}
+	suffix := key[len(bootstrapAnnotationPrefix):]
+	if len(suffix) == 0 {
+		return false
+	}
+	// RFC 4122 UUIDs are exactly 36 chars with 4 hyphens (8-4-4-4-12).
+	// Legacy keys used the rule *name* which won't match this pattern.
+	return !isUUID(suffix)
+}
+
+// isUUID performs a lightweight check for RFC 4122 UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// legacyBootstrapAnnotationKey returns the old-format annotation key used
+// before the UID migration: readiness.k8s.io/bootstrap-completed-<ruleName>.
+func legacyBootstrapAnnotationKey(ruleName string) string {
+	return bootstrapAnnotationPrefix + ruleName
+}
 
 // conditionsEqual checks if two condition slices are equal.
 func conditionsEqual(a, b []corev1.NodeCondition) bool {

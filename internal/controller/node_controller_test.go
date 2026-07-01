@@ -232,12 +232,12 @@ var _ = Describe("Node Controller", func() {
 					return false
 				}, time.Second*5).Should(BeFalse())
 
-				// Verify bootstrap completion annotation is added
+				// Verify bootstrap completion annotation is added (UID-based key)
 				Eventually(func() map[string]string {
 					updatedNode := &corev1.Node{}
 					_ = k8sClient.Get(ctx, namespacedName, updatedNode)
 					return updatedNode.Annotations
-				}).Should(HaveKey("readiness.k8s.io/bootstrap-completed-" + ruleName))
+				}).Should(HaveKey(bootstrapAnnotationKey(rule.GetUID())))
 			})
 
 			It("should not re-add the taint if conditions regress after completion", func() {

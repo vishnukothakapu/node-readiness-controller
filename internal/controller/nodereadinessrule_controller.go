@@ -51,9 +51,10 @@ const (
 // RuleReadinessController manages node taints based on readiness rules.
 type RuleReadinessController struct {
 	client.Client
-	Scheme        *runtime.Scheme
-	clientset     kubernetes.Interface
-	EventRecorder record.EventRecorder
+	Scheme                 *runtime.Scheme
+	clientset              kubernetes.Interface
+	EventRecorder          record.EventRecorder
+	EnableNodeStateMetrics bool
 
 	// Cache for efficient rule lookup
 	ruleCacheMutex sync.RWMutex
@@ -68,13 +69,14 @@ type RuleReconciler struct {
 }
 
 // NewRuleReadinessController creates a new controller.
-func NewRuleReadinessController(mgr ctrl.Manager, clientset kubernetes.Interface) *RuleReadinessController {
+func NewRuleReadinessController(mgr ctrl.Manager, clientset kubernetes.Interface, enableNodeStateMetrics bool) *RuleReadinessController {
 	return &RuleReadinessController{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		clientset:     clientset,
-		EventRecorder: mgr.GetEventRecorderFor("node-readiness-controller"),
-		ruleCache:     make(map[string]*readinessv1alpha1.NodeReadinessRule),
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		clientset:              clientset,
+		EventRecorder:          mgr.GetEventRecorderFor("node-readiness-controller"),
+		EnableNodeStateMetrics: enableNodeStateMetrics,
+		ruleCache:              make(map[string]*readinessv1alpha1.NodeReadinessRule),
 	}
 }
 
@@ -162,6 +164,13 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
+	// Update top-level rule metrics.
+	metrics.RuleLastReconciliationTime.WithLabelValues(rule.Name).Set(float64(time.Now().Unix()))
+
+	if r.Controller.EnableNodeStateMetrics {
+		r.Controller.SyncNodeStateMetrics(ctx, rule)
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -192,6 +201,22 @@ func (r *RuleReconciler) reconcileDelete(ctx context.Context, rule *readinessv1a
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Clean up metrics for deleted rule to prevent Go client memory leaks.
+	ruleLabel := prometheus.Labels{"rule": rule.Name}
+
+	// For single-label metrics, DeleteLabelValues is fine
+	metrics.RuleLastReconciliationTime.DeleteLabelValues(rule.Name)
+	metrics.BootstrapCompleted.DeleteLabelValues(rule.Name)
+	metrics.BootstrapDuration.DeleteLabelValues(rule.Name)
+
+	// For multi-label metrics, use DeletePartialMatch to wipe all combinations
+	metrics.NodesByState.DeletePartialMatch(ruleLabel)
+	metrics.Failures.DeletePartialMatch(ruleLabel)
+	metrics.ConditionEvaluationFailures.DeletePartialMatch(ruleLabel)
+	metrics.TaintOperations.DeletePartialMatch(ruleLabel)
+	metrics.ReconciliationLatency.DeletePartialMatch(ruleLabel)
+
 	return ctrl.Result{}, nil
 }
 
@@ -303,6 +328,7 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 
 		if !satisfied {
 			allConditionsSatisfied = false
+			metrics.ConditionEvaluationFailures.WithLabelValues(rule.Name, condReq.Type).Inc()
 		}
 
 		conditionResults = append(conditionResults, readinessv1alpha1.ConditionEvaluationResult{
@@ -325,6 +351,33 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 
 	isFirstEvaluation := r.getPreviousNodeEvaluation(rule, node.Name) == nil
 
+	// Calculate the latest transition time globally so all metrics can share it.
+	// We intentionally isolate the most recent transition time among all required conditions.
+	// Since the controller must wait for the combined state of all conditions to change
+	// before taking action, the condition that changed most recently is the "trigger" event.
+	var latestTransition metav1.Time
+	for _, req := range rule.Spec.Conditions {
+		for _, cond := range node.Status.Conditions {
+			if string(cond.Type) == req.Type && cond.LastTransitionTime.After(latestTransition.Time) {
+				latestTransition = cond.LastTransitionTime
+			}
+		}
+	}
+
+	recordLatency := func(operation string) {
+		if !latestTransition.IsZero() {
+			latency := time.Since(latestTransition.Time).Seconds()
+
+			// Protect against NTP clock drift between the node and controller.
+			// If the node's clock is ahead, latency will be negative.
+			if latency < 0 {
+				latency = 0
+			}
+
+			metrics.ReconciliationLatency.WithLabelValues(rule.Name, operation).Observe(latency)
+		}
+	}
+
 	var err error
 
 	switch {
@@ -335,11 +388,40 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 			metrics.Failures.WithLabelValues(rule.Name, "RemoveTaintError").Inc()
 			return fmt.Errorf("failed to remove taint: %w", err)
 		}
+
+		// Record taint removal latency and taint operation counter.
 		metrics.TaintOperations.WithLabelValues(rule.Name, "remove").Inc()
+		recordLatency("remove_taint")
 
 		// Mark bootstrap completed if bootstrap-only mode
 		if rule.Spec.EnforcementMode == readinessv1alpha1.EnforcementModeBootstrapOnly {
 			r.markBootstrapCompleted(ctx, node.Name, rule.Name)
+
+			// Only record the bootstrap duration if the node was created AFTER the rule.
+			// This prevents legacy nodes from poisoning the histogram with massive outliers.
+			if !node.CreationTimestamp.Time.Before(rule.CreationTimestamp.Time) {
+				duration := latestTransition.Time.Sub(node.CreationTimestamp.Time).Seconds()
+				metrics.BootstrapDuration.WithLabelValues(rule.Name).Observe(duration)
+			} else {
+				log.V(4).Info("Skipping bootstrap duration metric for legacy node",
+					"node", node.Name,
+					"rule", rule.Name)
+			}
+
+			// Only record the bootstrap duration if the node was created AFTER the rule.
+			// This prevents legacy nodes from poisoning the histogram with massive outliers.
+			if !node.CreationTimestamp.Time.Before(rule.CreationTimestamp.Time) && !latestTransition.IsZero() {
+				// Use ONLY API-server-generated timestamps to avoid Controller/Node clock skew
+				duration := latestTransition.Time.Sub(node.CreationTimestamp.Time).Seconds()
+
+				if duration > 0 {
+					metrics.BootstrapDuration.WithLabelValues(rule.Name).Observe(duration)
+				}
+			} else {
+				log.V(4).Info("Skipping bootstrap duration metric for legacy node or missing transition",
+					"node", node.Name,
+					"rule", rule.Name)
+			}
 		}
 
 	case !shouldRemoveTaint && !currentlyHasTaint:
@@ -349,7 +431,10 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 			metrics.Failures.WithLabelValues(rule.Name, "AddTaintError").Inc()
 			return fmt.Errorf("failed to add taint: %w", err)
 		}
+
+		// Record add taint latency and taint operation counter
 		metrics.TaintOperations.WithLabelValues(rule.Name, "add").Inc()
+		recordLatency("add_taint")
 
 	case !shouldRemoveTaint && currentlyHasTaint:
 		if isFirstEvaluation {

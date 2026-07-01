@@ -161,6 +161,8 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			"rule", rule.Name,
 			"resourceVersion", rule.ResourceVersion)
 
+		var successfullyPatchedRule *readinessv1alpha1.NodeReadinessRule
+
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestRule := &readinessv1alpha1.NodeReadinessRule{}
 			if err := r.Get(ctx, client.ObjectKey{Name: rule.Name}, latestRule); err != nil {
@@ -207,7 +209,12 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			}
 			latestRule.Status.FailedNodes = updatedFailedNodes
 
-			return r.Status().Patch(ctx, latestRule, patch)
+			if err := r.Status().Patch(ctx, latestRule, patch); err != nil {
+				return err
+			}
+
+			successfullyPatchedRule = latestRule
+			return nil
 		})
 
 		if err != nil {
@@ -222,6 +229,12 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 				"node", node.Name,
 				"rule", rule.Name,
 				"newResourceVersion", rule.ResourceVersion)
+
+			if r.EnableNodeStateMetrics {
+				if successfullyPatchedRule != nil {
+					r.SyncNodeStateMetrics(ctx, successfullyPatchedRule)
+				}
+			}
 		}
 	}
 
@@ -406,4 +419,27 @@ func (r *RuleReadinessController) recordNodeFailure(
 	})
 
 	rule.Status.FailedNodes = failedNodes
+}
+
+// SyncNodeStateMetrics synchronizes the NodesByState Prometheus metrics with the current rule status.
+func (r *RuleReadinessController) SyncNodeStateMetrics(ctx context.Context, rule *readinessv1alpha1.NodeReadinessRule) {
+	var ready, notReady, bootstrapping float64
+
+	for _, eval := range rule.Status.NodeEvaluations {
+		if eval.TaintStatus == readinessv1alpha1.TaintStatusAbsent {
+			ready++
+		} else {
+			// The taint is still present.
+			if rule.Spec.EnforcementMode == readinessv1alpha1.EnforcementModeBootstrapOnly {
+				// In BootstrapOnly mode, if the taint is present, it is still bootstrapping.
+				bootstrapping++
+			} else {
+				notReady++
+			}
+		}
+	}
+
+	metrics.NodesByState.WithLabelValues(rule.Name, "ready").Set(ready)
+	metrics.NodesByState.WithLabelValues(rule.Name, "not_ready").Set(notReady)
+	metrics.NodesByState.WithLabelValues(rule.Name, "bootstrapping").Set(bootstrapping)
 }

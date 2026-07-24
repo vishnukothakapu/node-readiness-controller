@@ -1044,21 +1044,21 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			}
 
 			// Test condition exists and matches
-			status, ok := readinessController.getConditionStatus(
+			status, ok := conditionStatus(
 				node, "Ready", corev1.ConditionUnknown,
 			)
 			Expect(status).To(Equal(corev1.ConditionTrue))
 			Expect(ok).To(BeTrue())
 
 			// Test condition exists but doesn't match
-			status, ok = readinessController.getConditionStatus(
+			status, ok = conditionStatus(
 				node, "NetworkReady", corev1.ConditionUnknown,
 			)
 			Expect(status).To(Equal(corev1.ConditionFalse))
 			Expect(ok).To(BeTrue())
 
 			// Test missing condition
-			status, ok = readinessController.getConditionStatus(
+			status, ok = conditionStatus(
 				node, "StorageReady", corev1.ConditionUnknown,
 			)
 			Expect(status).To(Equal(corev1.ConditionUnknown))
@@ -1066,7 +1066,7 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 
 			// Test missing condition with a non-Unknown default — condition is absent so
 			// conditionFound=false, but the returned status equals the supplied default.
-			status, ok = readinessController.getConditionStatus(
+			status, ok = conditionStatus(
 				node, "NewCondition", corev1.ConditionTrue,
 			)
 			Expect(status).To(Equal(corev1.ConditionTrue))
@@ -2178,7 +2178,7 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			Expect(failedNames).To(ContainElement("fail-path-node"))
 		})
 
-		It("should remove stale failedNodes entry when evaluation succeeds and include the node in appliedNodes", func() {
+		It("stale failedNodes entries are cleared after successful evaluation", func() {
 			successNode := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   "stale-recovery-node",
@@ -2233,6 +2233,160 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 				failedNames = append(failedNames, f.NodeName)
 			}
 			Expect(failedNames).NotTo(ContainElement("stale-recovery-node"))
+		})
+	})
+
+	Context("ConditionPolicy", func() {
+		var (
+			anyOfController *RuleReadinessController
+			anyOfNode       *corev1.Node
+		)
+
+		BeforeEach(func() {
+			anyOfController = &RuleReadinessController{
+				Client:        k8sClient,
+				Scheme:        scheme,
+				clientset:     fakeClientset,
+				ruleCache:     make(map[string]*nodereadinessiov1alpha1.NodeReadinessRule),
+				EventRecorder: record.NewFakeRecorder(10),
+			}
+			anyOfNode = &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "anyof-test-node",
+					Labels: map[string]string{"anyof-test": "true"},
+				},
+				Spec:   corev1.NodeSpec{},
+				Status: corev1.NodeStatus{},
+			}
+		})
+
+		It("anyOf: removes taint when at least one condition is satisfied", func() {
+			anyOfNode.Status.Conditions = []corev1.NodeCondition{
+				{Type: "gpu.example.com/HardwareDriverReady", Status: corev1.ConditionTrue},
+				{Type: "gpu.example.com/SoftwareFallbackReady", Status: corev1.ConditionFalse},
+			}
+			anyOfNode.Spec.Taints = []corev1.Taint{
+				{Key: "readiness.k8s.io/GPUReady", Effect: corev1.TaintEffectNoSchedule},
+			}
+
+			rule := &nodereadinessiov1alpha1.NodeReadinessRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "anyof-rule-removes-taint"},
+				Spec: nodereadinessiov1alpha1.NodeReadinessRuleSpec{
+					ConditionPolicy: nodereadinessiov1alpha1.ConditionPolicyAnyOf,
+					Conditions: []nodereadinessiov1alpha1.ConditionRequirement{
+						{Type: "gpu.example.com/HardwareDriverReady", RequiredStatus: corev1.ConditionTrue},
+						{Type: "gpu.example.com/SoftwareFallbackReady", RequiredStatus: corev1.ConditionTrue},
+					},
+					Taint:           corev1.Taint{Key: "readiness.k8s.io/GPUReady", Effect: corev1.TaintEffectNoSchedule},
+					NodeSelector:    metav1.LabelSelector{MatchLabels: map[string]string{"anyof-test": "true"}},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+				},
+			}
+			anyOfController.updateRuleCache(ctx, rule)
+
+			Expect(k8sClient.Create(ctx, anyOfNode)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, anyOfNode)).To(Succeed()) }()
+			Expect(anyOfController.evaluateRuleForNode(ctx, rule, anyOfNode)).To(Succeed())
+
+			// Taint should have been removed because HardwareDriverReady=True satisfies anyOf
+			Expect(anyOfController.hasTaintBySpec(anyOfNode, rule.Spec.Taint)).To(BeFalse())
+
+			// conditionResults in status should reflect actual observed values
+			eval := anyOfController.getPreviousNodeEvaluation(rule, anyOfNode.Name)
+			Expect(eval).NotTo(BeNil())
+			Expect(eval.ConditionResults).To(HaveLen(2))
+		})
+
+		It("anyOf: keeps taint when no conditions are satisfied", func() {
+			anyOfNode.Status.Conditions = []corev1.NodeCondition{
+				{Type: "gpu.example.com/HardwareDriverReady", Status: corev1.ConditionFalse},
+				{Type: "gpu.example.com/SoftwareFallbackReady", Status: corev1.ConditionFalse},
+			}
+			// Node has no taint; controller should add one
+			anyOfNode.Spec.Taints = nil
+
+			rule := &nodereadinessiov1alpha1.NodeReadinessRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "anyof-rule-adds-taint"},
+				Spec: nodereadinessiov1alpha1.NodeReadinessRuleSpec{
+					ConditionPolicy: nodereadinessiov1alpha1.ConditionPolicyAnyOf,
+					Conditions: []nodereadinessiov1alpha1.ConditionRequirement{
+						{Type: "gpu.example.com/HardwareDriverReady", RequiredStatus: corev1.ConditionTrue},
+						{Type: "gpu.example.com/SoftwareFallbackReady", RequiredStatus: corev1.ConditionTrue},
+					},
+					Taint:           corev1.Taint{Key: "readiness.k8s.io/GPUReady", Effect: corev1.TaintEffectNoSchedule},
+					NodeSelector:    metav1.LabelSelector{MatchLabels: map[string]string{"anyof-test": "true"}},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+				},
+			}
+			anyOfController.updateRuleCache(ctx, rule)
+
+			Expect(k8sClient.Create(ctx, anyOfNode)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, anyOfNode)).To(Succeed()) }()
+			Expect(anyOfController.evaluateRuleForNode(ctx, rule, anyOfNode)).To(Succeed())
+
+			// Taint should have been added because neither condition is satisfied
+			Expect(anyOfController.hasTaintBySpec(anyOfNode, rule.Spec.Taint)).To(BeTrue())
+		})
+
+		It("allOf (explicit): keeps taint when only one of two conditions is satisfied", func() {
+			anyOfNode.Status.Conditions = []corev1.NodeCondition{
+				{Type: "example.com/CondA", Status: corev1.ConditionTrue},
+				{Type: "example.com/CondB", Status: corev1.ConditionFalse},
+			}
+			anyOfNode.Spec.Taints = []corev1.Taint{
+				{Key: "readiness.k8s.io/MultiCond", Effect: corev1.TaintEffectNoSchedule},
+			}
+
+			rule := &nodereadinessiov1alpha1.NodeReadinessRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "allof-explicit-rule"},
+				Spec: nodereadinessiov1alpha1.NodeReadinessRuleSpec{
+					ConditionPolicy: nodereadinessiov1alpha1.ConditionPolicyAllOf,
+					Conditions: []nodereadinessiov1alpha1.ConditionRequirement{
+						{Type: "example.com/CondA", RequiredStatus: corev1.ConditionTrue},
+						{Type: "example.com/CondB", RequiredStatus: corev1.ConditionTrue},
+					},
+					Taint:           corev1.Taint{Key: "readiness.k8s.io/MultiCond", Effect: corev1.TaintEffectNoSchedule},
+					NodeSelector:    metav1.LabelSelector{MatchLabels: map[string]string{"anyof-test": "true"}},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+				},
+			}
+			anyOfController.updateRuleCache(ctx, rule)
+
+			Expect(k8sClient.Create(ctx, anyOfNode)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, anyOfNode)).To(Succeed()) }()
+			Expect(anyOfController.evaluateRuleForNode(ctx, rule, anyOfNode)).To(Succeed())
+
+			// Taint must remain because CondB is still False
+			Expect(anyOfController.hasTaintBySpec(anyOfNode, rule.Spec.Taint)).To(BeTrue())
+		})
+
+		It("anyOf: missing condition evaluated via defaultStatus does not auto-satisfy", func() {
+			// Node has NO conditions at all
+			anyOfNode.Status.Conditions = nil
+			anyOfNode.Spec.Taints = nil
+
+			rule := &nodereadinessiov1alpha1.NodeReadinessRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "anyof-missing-condition-rule"},
+				Spec: nodereadinessiov1alpha1.NodeReadinessRuleSpec{
+					ConditionPolicy: nodereadinessiov1alpha1.ConditionPolicyAnyOf,
+					Conditions: []nodereadinessiov1alpha1.ConditionRequirement{
+						// No defaultStatus set — will resolve to Unknown, which != True
+						{Type: "gpu.example.com/HardwareDriverReady", RequiredStatus: corev1.ConditionTrue},
+					},
+					Taint:           corev1.Taint{Key: "readiness.k8s.io/GPUReady", Effect: corev1.TaintEffectNoSchedule},
+					NodeSelector:    metav1.LabelSelector{MatchLabels: map[string]string{"anyof-test": "true"}},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+				},
+			}
+			anyOfController.updateRuleCache(ctx, rule)
+
+			Expect(k8sClient.Create(ctx, anyOfNode)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, anyOfNode)).To(Succeed()) }()
+			Expect(anyOfController.evaluateRuleForNode(ctx, rule, anyOfNode)).To(Succeed())
+
+			// Missing condition resolves to Unknown != True, so anyOf is not satisfied
+			// Taint should have been added (node has none, conditions not satisfied)
+			Expect(anyOfController.hasTaintBySpec(anyOfNode, rule.Spec.Taint)).To(BeTrue())
 		})
 	})
 })

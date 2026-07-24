@@ -33,6 +33,18 @@ const (
 	EnforcementModeContinuous EnforcementMode = "continuous"
 )
 
+// ConditionPolicy defines how the list of conditions is aggregated when evaluating a rule.
+// +kubebuilder:validation:Enum=allOf;anyOf
+type ConditionPolicy string
+
+const (
+	// ConditionPolicyAllOf requires ALL conditions to match their requiredStatus (default).
+	ConditionPolicyAllOf ConditionPolicy = "allOf"
+
+	// ConditionPolicyAnyOf requires at least ONE condition to match its requiredStatus.
+	ConditionPolicyAnyOf ConditionPolicy = "anyOf"
+)
+
 // TaintStatus specifies status of the Taint on Node.
 // +kubebuilder:validation:Enum=Present;Absent
 type TaintStatus string
@@ -98,6 +110,16 @@ type NodeReadinessRuleSpec struct {
 	// +required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="nodeSelector is immutable"
 	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty,omitzero"`
+
+	// conditionPolicy controls how the conditions list is evaluated.
+	// "allOf" (default) requires every condition to match its requiredStatus before the taint is removed.
+	// "anyOf" requires at least one condition to match its requiredStatus.
+	//
+	// Cannot be used with enforcementMode: bootstrap-only.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="conditionPolicy is immutable"
+	ConditionPolicy ConditionPolicy `json:"conditionPolicy,omitempty"` // Use GetConditionPolicy() for safe access; field may be empty even when allOf applies.
 
 	// dryRun when set to true, The controller will evaluate Node conditions and log intended taint modifications
 	// without persisting changes to the cluster. Proposed actions are reflected in the resource status.
@@ -276,7 +298,7 @@ type ConditionEvaluationResult struct {
 	//
 	// +optional
 	// +kubebuilder:validation:Enum=True;False;Unknown
-	DefaultStatus corev1.ConditionStatus `json:"defaultStatus,omitempty"`
+	DefaultStatus corev1.ConditionStatus `json:"defaultStatus,omitempty"` // Use GetDefaultStatus() for safe access; field may be empty even when Unknown applies.
 }
 
 // DryRunResults provides a summary of the actions the controller would perform if DryRun mode is enabled.
@@ -378,6 +400,36 @@ func (c *ConditionRequirement) GetDefaultStatus() corev1.ConditionStatus {
 	}
 	return c.DefaultStatus
 }
+
+// GetConditionPolicy returns the effective condition policy, defaulting to allOf
+// when the field is not explicitly set.
+//
+// Always use this method instead of reading ConditionPolicy directly. The field
+// is intentionally left without an OpenAPI schema default (kubebuilder:default
+// is forbidden by project policy) and the Spec is immutable, so defaulting
+// must happen at read time via this accessor.
+func (spec *NodeReadinessRuleSpec) GetConditionPolicy() ConditionPolicy {
+	if spec.ConditionPolicy == "" {
+		return ConditionPolicyAllOf
+	}
+	return spec.ConditionPolicy
+}
+
+// GetDefaultStatus returns the effective default status for a condition evaluation
+// result whose condition was not found on the node. If the field is unset (empty
+// string), it falls back to corev1.ConditionUnknown.
+//
+// Always use this method instead of reading DefaultStatus directly. The field
+// is intentionally left without an OpenAPI schema default (kubebuilder:default
+// is forbidden by project policy) and the Spec is immutable, so defaulting
+// must happen at read time via this accessor.
+func (r *ConditionEvaluationResult) GetDefaultStatus() corev1.ConditionStatus {
+	if r.DefaultStatus == "" {
+		return corev1.ConditionUnknown
+	}
+	return r.DefaultStatus
+}
+
 
 func init() {
 	objectTypes = append(objectTypes, &NodeReadinessRule{}, &NodeReadinessRuleList{})

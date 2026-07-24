@@ -320,12 +320,11 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 	defer timer.ObserveDuration()
 	log := ctrl.LoggerFrom(ctx)
 
-	// Evaluate all conditions (ALL logic)
-	allConditionsSatisfied := true
+	// Evaluate all conditions
 	conditionResults := make([]readinessv1alpha1.ConditionEvaluationResult, 0, len(rule.Spec.Conditions))
 
 	for _, condReq := range rule.Spec.Conditions {
-		effectiveStatus, conditionFound := r.getConditionStatus(
+		effectiveStatus, conditionFound := conditionStatus(
 			node,
 			condReq.Type,
 			condReq.GetDefaultStatus(),
@@ -340,7 +339,6 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 		}
 
 		if !satisfied {
-			allConditionsSatisfied = false
 			metrics.ConditionEvaluationFailures.WithLabelValues(rule.Name, condReq.Type).Inc()
 		}
 
@@ -357,12 +355,12 @@ func (r *RuleReadinessController) evaluateRuleForNode(ctx context.Context, rule 
 			"satisfied", satisfied)
 	}
 
-	// Determine taint action
-	shouldRemoveTaint := allConditionsSatisfied
+	// Determine taint action using the rule's conditionPolicy (allOf or anyOf)
+	shouldRemoveTaint := isConditionsSatisfied(rule.Spec, node)
 	currentlyHasTaint := r.hasTaintBySpec(node, rule.Spec.Taint)
 
 	log.Info("Evaluation result", "node", node.Name, "rule", rule.Name,
-		"allConditionsSatisfied", allConditionsSatisfied, "hasTaint", currentlyHasTaint)
+		"conditionPolicy", rule.Spec.GetConditionPolicy(), "conditionsSatisfied", shouldRemoveTaint, "hasTaint", currentlyHasTaint)
 
 	isFirstEvaluation := r.getPreviousNodeEvaluation(rule, node.Name) == nil
 
@@ -604,25 +602,15 @@ func (r *RuleReadinessController) processDryRun(ctx context.Context, rule *readi
 
 		affectedNodes++
 
-		// Simulate rule evaluation
-		allConditionsSatisfied := true
+		// Simulate rule evaluation using the rule's conditionPolicy
 		missingConditions := 0
-
 		for _, condReq := range rule.Spec.Conditions {
-			currentStatus, conditionFound := r.getConditionStatus(
-				&node,
-				condReq.Type,
-				condReq.GetDefaultStatus(),
-			)
-			if !conditionFound {
+			if _, found := conditionStatus(&node, condReq.Type, condReq.GetDefaultStatus()); !found {
 				missingConditions++
-			}
-			if currentStatus != condReq.RequiredStatus {
-				allConditionsSatisfied = false
 			}
 		}
 
-		shouldRemoveTaint := allConditionsSatisfied
+		shouldRemoveTaint := isConditionsSatisfied(rule.Spec, &node)
 		currentlyHasTaint := r.hasTaintBySpec(&node, rule.Spec.Taint)
 
 		if shouldRemoveTaint && currentlyHasTaint {

@@ -1,4 +1,4 @@
-# UI Design Document: Node Readiness Controller
+﻿# UI Design Document: Node Readiness Controller
 
 ### LFX Project: Headlamp Plugin for Node Readiness Controller (Term 3)
 
@@ -28,7 +28,7 @@ The project answers two main questions:
 
 ## Relationship to Term 2 Observability
 
-The Term 2 observability project delivered Prometheus metrics (`node_readiness_rule_nodes{state}`, `node_readiness_rule_matched_nodes`, etc.) via scrape-time collectors and a Grafana dashboard for fleet-wide SLO monitoring. This plugin complements that work by answering **per-object** questions that metrics cannot: _which_ node is failing _which_ rule's _which_ condition, and what the failure reason is. The two systems serve different personas — Grafana for SREs monitoring trends over time, Headlamp for operators debugging a specific node right now.
+The Term 2 observability project delivered Prometheus metrics (`node_readiness_rule_nodes{state}`, `node_readiness_rule_matched_nodes`, etc.) via scrape-time collectors and a Grafana dashboard for fleet-wide SLO monitoring. This plugin complements that work by answering **per-object** questions that metrics cannot: _which_ node is failing _which_ rule's _which_ condition, and what the failure reason is. The two systems serve different personas â€” Grafana for SREs monitoring trends over time, Headlamp for operators debugging a specific node right now.
 
 ---
 
@@ -39,7 +39,7 @@ The Term 2 observability project delivered Prometheus metrics (`node_readiness_r
 We design the UI around the same distinct personas used in the controller observability design.
 
 1. **Infrastructure Owners (Cluster Operators):** They run the cluster and manage the node lifecycle. They need a Landing Page to confirm the controller is active and see fleet-wide enforcement status without leaving the dashboard. This is presented via high-level summary cards (e.g., Total Active Rules, Targeted Nodes, Satisfied Nodes, Failed Nodes) without requiring heavy per-node data fetching (see Section 7.1).
-2. **Component / Rule Owners:** They own the infrastructure components that gate node readiness (CNI, GPU drivers, CSI). They need the Rule Details View to see how their rule propagates. *(Note: To identify specific failing nodes, the plugin will rely exclusively on the new `NodeReadinessEvaluation` (NRE) objects, bypassing legacy fields entirely. We plan to explore optimal ways to list failing NREs per rule—such as via NRE label selectors—without fetching all NREs globally.)*
+2. **Component / Rule Owners:** They own the infrastructure components that gate node readiness (CNI, GPU drivers, CSI). They need the Rule Details View to see how their rule propagates. *(Note: To identify specific failing nodes, the plugin will rely exclusively on the new `NodeReadinessEvaluation` (NRE) objects, bypassing legacy fields entirely. We plan to explore optimal ways to list failing NREs per ruleâ€”such as via NRE label selectorsâ€”without fetching all NREs globally.)*
 3. **Workload Owners (Application Developers):** They run pods. They need the Node Detail Extension and the `NodeReadinessEvaluation` (NRE) Details View to understand exactly which conditions or rules are preventing their pods from scheduling on a specific node.
 
 ---
@@ -85,7 +85,9 @@ The plugin reads from the `readiness.node.x-k8s.io/v1alpha1` API group. Both cus
 | `status.dryRunResults.riskyOperations` | `*int32` | Rule Details (Dry-Run section) |
 | `status.dryRunResults.summary` | `string` | Rule Details (Dry-Run section) |
 
-> **Dependency Note:** The plugin computes aggregated statistics (targeted, satisfied, failed nodes) entirely client-side by iterating over the existing `status.nodeEvaluations` array. This provides immediate, real-time observability without introducing backend overhead or new API fields. Once the upcoming `NodeReadinessEvaluation` (NRE) CRD stabilizes, the plugin will transition to consuming those resources.\n\n#### 3.2 NodeReadinessEvaluation Fields Consumed
+> **Dependency Note:** The plugin computes aggregated statistics (targeted, satisfied, failed nodes) entirely client-side by iterating over the existing `status.nodeEvaluations` array. This provides immediate, real-time observability without introducing backend overhead or new API fields. Once the upcoming `NodeReadinessEvaluation` (NRE) CRD stabilizes, the plugin will transition to consuming those resources.
+
+#### 3.2 NodeReadinessEvaluation Fields Consumed
 
 The `NodeReadinessEvaluation` (NRE) CRD is a per-node evaluation object currently under development ([Issue #327](https://github.com/kubernetes-sigs/node-readiness-controller/issues/327)). It is targeted to ship as **experimental in NRC v0.6.0** and stabilize in **v0.7.0**.
 
@@ -195,13 +197,14 @@ No manual DOM manipulation is needed. React's reconciliation handles all UI upda
 | Decision | Rationale |
 |---|---|
 | **Lazy initial load.** The Landing Page verifies CRD existence only. It does not list rules or evaluations until the user navigates deeper. | Prevents API blast on plugin open. |
-| **Client-side aggregation.** Node counts (targeted, satisfied, failed) are computed dynamically in the browser by aggregating `status.nodeEvaluations`. | Iterating over an array of 5,000 evaluations takes < 1ms in modern JavaScript, providing immediate UI value without expensive backend API changes. |\n| **Cardinality-aware filtering.** Columns like Name, Node Selector, and Taint are filterable but high-cardinality. Filters will use exact-match or substring search, not dropdown enums. Low-cardinality columns (Mode, Effect, Dry-Run) use dropdown filters. | Prevents loading thousands of unique filter values into memory. |
+| **Client-side aggregation.** Node counts (targeted, satisfied, failed) are computed dynamically in the browser by aggregating `status.nodeEvaluations`. | Iterating over an array of 5,000 evaluations takes < 1ms in modern JavaScript, providing immediate UI value without expensive backend API changes. |
+| **Cardinality-aware filtering.** Columns like Name, Node Selector, and Taint are filterable but high-cardinality. Filters will use exact-match or substring search, not dropdown enums. Low-cardinality columns (Mode, Effect, Dry-Run) use dropdown filters. | Prevents loading thousands of unique filter values into memory. |
 
 ---
 
 ### 7. UI Surface
 
-We define six primary user interfaces plus supporting features. All views use Headlamp's native `StatusLabel` component with colored badges for status indicators — **not emojis** — to stay consistent with the Headlamp community's established visual style. All interactive components use standard `@mui/material` components (`Chip`, `Typography`, `Box`, `Tooltip`, `Card`) to match Headlamp's visual aesthetic.
+We define six primary user interfaces plus supporting features. All views use Headlamp's native `StatusLabel` component with colored badges for status indicators â€” **not emojis** â€” to stay consistent with the Headlamp community's established visual style. All interactive components use standard `@mui/material` components (`Chip`, `Typography`, `Box`, `Tooltip`, `Card`) to match Headlamp's visual aesthetic.
 
 #### 7.1 Landing Page
 
@@ -263,10 +266,10 @@ Rendered using Headlamp's native `<Resource.MainInfoSection>` header component.
 A Material UI `<Box>` containing a flex row of metric chips:
   * **Targeted:** `{count}` (`<Chip size="small" color="default" />`)
   * **Satisfied:** `{count}` (`<Chip size="small" color="success" />`)
-  * **Unsatisfied:** `{count}` (`<Chip size="small" color="warning" />`) — computed as `targetedNodes - satisfiedNodes - failedNodes`.
+  * **Unsatisfied:** `{count}` (`<Chip size="small" color="warning" />`) â€” computed as `targetedNodes - satisfiedNodes - failedNodes`.
   * **Failed:** `{count}` (`<Chip size="small" color="error" />`)
 
-If `status.nodeEvaluations` is absent (first evaluation pending), all chips display `"—"` and the section shows a `<Typography variant="body2">` text: `"Evaluation pending"`.
+If `status.nodeEvaluations` is absent (first evaluation pending), all chips display `"â€”"` and the section shows a `<Typography variant="body2">` text: `"Evaluation pending"`.
 
 **Conditions Table:**
 Rendered using Headlamp's native `<SimpleTable>` component.
@@ -366,7 +369,7 @@ The built-in Headlamp `ResourceListView` already handles RBAC errors for list vi
 #### Dry-Run Mode
 When `spec.dryRun: true`, the Rule Details view renders the standard Node Status Section (from `status.nodeEvaluations`) **plus** a dedicated Dry-Run Results Section (from `status.dryRunResults`) that shows the controller's simulation output. See Section 7.3 for the full rendering specification.
 
-There is ongoing design work to evolve dry-run into a **lifecycle** — continuous per-node simulation via NRE, where each node gets a rule evaluation object with a dry-run status showing the evaluated outcome without actually applying taints. This work is led separately and targeted for NRC v0.7.0 or v0.8.0. The plugin will adopt richer per-node dry-run data as it becomes available.
+There is ongoing design work to evolve dry-run into a **lifecycle** â€” continuous per-node simulation via NRE, where each node gets a rule evaluation object with a dry-run status showing the evaluated outcome without actually applying taints. This work is led separately and targeted for NRC v0.7.0 or v0.8.0. The plugin will adopt richer per-node dry-run data as it becomes available.
 
 ---
 
@@ -377,7 +380,7 @@ There is ongoing design work to evolve dry-run into a **lifecycle** — continuo
 | CRD not installed (API returns `404` for `nodereadinessrules`) | Landing Page and Rule List show `<EmptyContent>` with message `"Node Readiness Controller CRDs not installed"` and a `<Link>` to installation instructions. |
 | NRE CRD not installed | NRE List shows `<EmptyContent>` with message `"NodeReadinessEvaluation CRD not installed. Requires NRC v0.6.0+"`. Node Extension is silently omitted. |
 | RBAC denies CRD read access (`403`) | List views show Headlamp's native permission error. Details pages show a custom `<EmptyContent>` with the missing permission. |
-| Rule has empty `status` (first evaluation pending) | Status column shows `"Pending"`. Node Status chips show `"—"`. No zero counts. |
+| Rule has empty `status` (first evaluation pending) | Status column shows `"Pending"`. Node Status chips show `"â€”"`. No zero counts. |
 | `metadata.deletionTimestamp` is present | Rule List shows `<StatusLabel>` with `status="warning"` and text `"Terminating"`. |
 | `spec.dryRun: true` | Rule List shows `<Chip color="warning" />` with text `"Dry Run"`. Rule Details renders the Dry-Run Results Section with simulation data. |
 | Node has no NRE evaluation data | Node Extension is silently omitted. |
@@ -447,6 +450,7 @@ The plugin is developed and merged incrementally. Each milestone corresponds to 
 | **M7: Topology Map (Optional)** | Visual cluster map view showing nodes and rule enforcement states. | Delegated | M3 merged |
 | **M8: Polish & Accessibility**| Accessibility (a11y) audit and dark/light theme validation. | Week 8 | All features merged |
 | **M9: Publish** | Stable `v1.0.0` published to Artifact Hub. | Week 9 | Beta feedback resolved |
+
 
 
 
